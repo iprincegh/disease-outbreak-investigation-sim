@@ -9,6 +9,7 @@ This was done as part of a field epidemiology training exercise, following the E
 Veronika hosted a dinner party with 56 guests. By the next day, most of them were sick; vomiting, nausea, diarrhoea. We sent out a structured questionnaire asking about symptoms, timing, and which of the 12 food items each person ate. The goal: figure out which food made everyone sick, and what pathogen was likely responsible.
 
 **Short version of the results:** 42 out of 56 guests fell ill (75% attack rate). Tiramisu had the strongest association with illness by a wide margin; 34 of 35 people who ate it got sick. The clinical picture (vomiting-predominant, ~30h median incubation, self-limiting) points to norovirus.
+**[See the full report →](https://htmlpreview.github.io/?https://github.com/iprincegh/disease-outbreak-investigation-sim/blob/main/outbreak_analysis.html)** *(for best rendering, clone the repo and knit the Rmd locally in RStudio)*
 
 ## Repo structure
 
