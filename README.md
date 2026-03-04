@@ -76,7 +76,7 @@ Sara, George, Christiane & Prince
 
 The methodology follows materials from:
 
-- Karch — *Dynamics of Infection* (R₀, Rₙ, secondary attack rates)
-- Wilking (RKI) — *Infectious Diseases Outbreak Investigations*
-- Jäger — *Outbreak Practical: Introduction*
+- Karch — *Dynamics of Infection* (R₀, Rₙ, secondary attack rates), Clinical Epidemiology Spring 2026
+- Wilking (RKI) — *Infectious Diseases Outbreak Investigations*, Clinical Epidemiology Spring 2026
+- Jäger — *Outbreak Practical: Introduction*, Clinical Epidemiology Spring 2026
 - The [`incidence2`](https://cran.r-project.org/package=incidence2) R package documentation
