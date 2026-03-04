@@ -1,0 +1,1050 @@
+---
+title: "Outbreak Investigation — Veronika's Party, 26 February 2026"
+subtitle: "Retrospective Cohort Study"
+author: "Field Epidemiology Team"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 9, fig.height = 5
+)
+```
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(epitools)
+library(incidence2)
+library(scales)
+```
+
+# Background
+
+On the evening of 26 February 2026, Veronika hosted a private dinner party. Within roughly
+24 hours, multiple guests began reporting gastrointestinal symptoms. On learning of the
+cluster, we launched a retrospective cohort study to identify the source.
+
+The goals of this investigation are to describe the outbreak in terms of person, place,
+and time; to identify the responsible food vehicle through analytical epidemiology; and
+to narrow down the likely pathogen based on the clinical and epidemiological profile.
+
+The data were collected via a structured questionnaire sent to all known attendees.
+For each guest, we recorded demographic details, illness status, symptom onset and
+resolution times, and consumption of each of the 12 food items served at the party.
+
+
+# Data Import and Cleaning
+
+The raw dataset is a semicolon-delimited CSV in Latin-1 encoding, with German-format
+datetime strings (DD.MM.YYYY HH:MM). We rename the German food item columns to English
+and parse all date-time fields.
+
+```{r import}
+raw <- read_delim(
+  "data/Outbreak_data.csv",
+  delim  = ";",
+  locale = locale(encoding = "latin1")
+)
+```
+
+```{r clean}
+df <- raw %>%
+  rename(
+    smoked_salmon  = Räucherlachsrolle,
+    tabouleh       = Taboule,
+    tiramisu       = Tiramisu,
+    hummus         = Hummus,
+    panna_cotta    = `Panna Cotta`,
+    spinach_quiche = Spinatquiche,
+    bread          = Brot,
+    tomato_mozz    = `Tomate Mozzarella`,
+    raw_veggies    = Rohkost,
+    herb_quark     = Kräuterquark,
+    strawberries   = Erdbeeren,
+    potato_salad   = Kartoffelsalat,
+    travelled      = travelled_outside_ger_4_weeks,
+    ill_prior      = ill_prior_party_4_weeks,
+    still_ill      = stillill,
+    blood_in_stool = bloodinstool,
+    abdom_cramps   = abdominalcramps
+  ) %>%
+  mutate(
+    arrival        = dmy_hm(arrival,   quiet = TRUE),
+    symp_onset     = dmy_hm(symp_onset, quiet = TRUE),
+    symp_stop      = dmy_hm(symp_stop,  quiet = TRUE),
+    exposure_time  = dmy_hm(exposure_time, quiet = TRUE),
+    sex            = factor(sex, levels = c("male", "female"))
+  )
+
+party_time <- dmy_hm("26.02.2026 19:00")
+
+food_cols <- c("smoked_salmon", "tabouleh", "tiramisu", "hummus",
+               "panna_cotta", "spinach_quiche", "bread", "tomato_mozz",
+               "raw_veggies", "herb_quark", "strawberries", "potato_salad")
+```
+
+## Defining the Study Cohort
+
+We restrict the analysis to those persons who actually attended the party (`attended = 1`).
+The `ill` field from the questionnaire is used directly as the case variable — all
+discrepancies identified in earlier data versions (e.g., Margarete Schubert originally
+miscoded as `ill = 0` despite reporting symptoms) have been corrected in the current
+dataset.
+
+One minor data entry issue remains: Margarete Schubert's `symp_stop` field is recorded as
+`28.02.202 20:00` (a missing digit in the year). We fix this in the cleaning step below.
+
+Two derived variables are computed from the outset. **Incubation time** is the interval in
+hours from the fixed party start (26 Feb 19:00) to each case's symptom onset. **Illness
+duration** is the interval from symptom onset to symptom resolution.
+
+```{r cohort}
+cohort <- df %>%
+  filter(attended == 1) %>%
+  mutate(
+    case = as.integer(ill == 1),
+    # Fix Margarete Schubert's truncated symp_stop: "28.02.202 20:00" → proper datetime
+    symp_stop = if_else(
+      last == "Schubert" & first == "Margarete" & is.na(symp_stop),
+      dmy_hm("28.02.2026 20:00", quiet = TRUE),
+      symp_stop
+    ),
+    incubation_h = as.numeric(difftime(symp_onset, party_time, units = "hours")),
+    duration_h   = as.numeric(difftime(symp_stop, symp_onset, units = "hours"))
+  )
+```
+
+This gives us a cohort of **`r nrow(cohort)`** attendees, of whom
+**`r sum(cohort$case == 1, na.rm = TRUE)`** meet the case definition.
+
+
+# Case Definition
+
+> A **case** is defined as any person who attended Veronika's party on 26 February 2026
+> and subsequently reported gastrointestinal illness (`ill = 1` on the questionnaire),
+> characterised by vomiting, diarrhoea, and/or nausea.
+
+```{r case-summary}
+cohort %>%
+  count(case) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c("Case (1=ill)", "n", "%"))
+```
+
+The overall **attack rate** is `r round(mean(cohort$case, na.rm = TRUE) * 100, 1)`%
+— an exceptionally high proportion suggesting either a highly infectious agent, a heavily
+contaminated food vehicle that nearly everyone consumed, or both.
+
+
+# Descriptive Epidemiology
+
+## Who Was Affected?
+
+We first describe the cases and non-cases by age and sex to see whether the outbreak
+shows any demographic pattern.
+
+```{r demographics}
+cohort %>%
+  group_by(case) %>%
+  summarise(
+    n      = n(),
+    age_mean   = round(mean(age, na.rm = TRUE), 1),
+    age_median = round(median(age, na.rm = TRUE), 1),
+    age_range  = paste0(min(age, na.rm = TRUE), " – ", max(age, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  knitr::kable()
+```
+
+```{r sex-ar}
+cohort %>%
+  group_by(sex) %>%
+  summarise(n = n(), cases = sum(case), AR = paste0(round(cases/n*100,1), "%"),
+            .groups = "drop") %>%
+  knitr::kable(caption = "Attack rate by sex")
+```
+
+```{r age-groups}
+cohort %>%
+  mutate(age_grp = cut(age, breaks = c(0,10,18,30,45,Inf), right = FALSE,
+                        labels = c("0-10","11-18","19-30","31-45","46+"))) %>%
+  group_by(age_grp) %>%
+  summarise(n = n(), cases = sum(case, na.rm = TRUE),
+            AR = paste0(round(cases/n*100,1), "%"), .groups = "drop") %>%
+  knitr::kable(caption = "Attack rate by age group")
+```
+
+Both sexes and all age groups were affected at similar rates, which is typical of a
+common-source foodborne outbreak — the risk is determined by what you ate, not who you are.
+
+
+# Epidemic Curve
+
+The epidemic curve is the centrepiece of descriptive epidemiology. Its shape alone can
+distinguish a point-source outbreak (single sharp peak following a common exposure) from a
+propagated one (multiple successive waves reflecting person-to-person chains).
+
+We use 3-hour bins and the EPIET convention of one stacked square per case. The x-axis
+has a two-level structure: 6-hour time marks (`00– 06– 12– 18–`) with full dates printed
+below, and vertical lines at midnight separating the days.
+
+```{r epicurve, fig.height=6, fig.width=12}
+onset_df <- cohort %>% filter(case == 1, !is.na(symp_onset))
+
+bin_seconds <- 3 * 3600
+onset_df <- onset_df %>%
+  mutate(bin = as.POSIXct(floor(as.numeric(symp_onset) / bin_seconds) * bin_seconds,
+                          origin = "1970-01-01", tz = "UTC")) %>%
+  arrange(bin) %>%
+  group_by(bin) %>%
+  mutate(y = row_number()) %>%
+  ungroup()
+
+# Day boundaries for vertical separator lines at midnight
+day_starts <- seq(
+  from = as.POSIXct(floor(as.numeric(min(onset_df$bin)) / 86400) * 86400,
+                    origin = "1970-01-01", tz = "UTC"),
+  to   = max(onset_df$bin) + 86400,
+  by   = "1 day"
+)
+
+# Date labels centred at midday of each day
+day_labels_df <- tibble(
+  x     = day_starts[-length(day_starts)] + 43200,
+  label = format(day_starts[-length(day_starts)], "%d %B")
+)
+
+# 6-hour tick positions (00– 06– 12– 18–)
+hour_ticks  <- seq(from = day_starts[1], to = max(day_starts), by = "6 hours")
+hour_labs   <- paste0(format(hour_ticks, "%H"), "\u2013")
+
+y_max <- max(onset_df$y)
+
+ggplot(onset_df, aes(x = bin, y = y)) +
+  geom_tile(aes(fill = "case"), width = bin_seconds * 0.9, height = 0.9,
+            colour = "white", show.legend = TRUE) +
+  scale_fill_manual(values = c("case" = "grey55"), labels = c("One case")) +
+  geom_vline(xintercept = as.numeric(day_starts),
+             colour = "grey40", linewidth = 0.3) +
+  geom_vline(xintercept = as.numeric(party_time),
+             linetype = "dashed", colour = "red", linewidth = 0.8) +
+  annotate("text", x = party_time, y = y_max + 1.2,
+           label = "Party  26 Feb 19:00", colour = "red",
+           size = 3.2, hjust = -0.05, fontface = "bold") +
+  scale_x_datetime(
+    breaks = hour_ticks,
+    labels = hour_labs,
+    expand = expansion(mult = c(0.005, 0.005))
+  ) +
+  annotate("text", x = day_labels_df$x, y = -1.8,
+           label = day_labels_df$label,
+           size = 3.2, fontface = "bold") +
+  scale_y_continuous(
+    breaks = seq(0, 20, 1),
+    expand = expansion(add = c(0, 2))
+  ) +
+  coord_cartesian(clip = "off") +
+  labs(title = "Epidemic Curve (3-hour bins)",
+       x = "Date and time of onset",
+       y = "Number of cases",
+       fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x        = element_text(size = 7),
+    axis.title.x       = element_text(margin = margin(t = 25)),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position      = c(0.95, 0.95),
+    legend.justification = c(1, 1),
+    legend.background    = element_rect(fill = "white", colour = "grey70",
+                                        linewidth = 0.3),
+    legend.key.size      = unit(0.5, "cm"),
+    plot.margin          = margin(10, 10, 30, 10)
+  )
+```
+
+The shape is unambiguously a **point-source** pattern: a single sharp peak building
+rapidly after the party, then declining. There is no secondary wave that would suggest
+ongoing person-to-person propagation.
+
+
+## Daily Epicurve and Peak Estimation (incidence2)
+
+The `incidence2` package provides a formal framework for computing and visualising
+incidence data. We aggregate onset dates into a daily `incidence2` object using
+`incidence()`, specifying the date column as the index. The `show_cases = TRUE` option
+renders each case as a stacked square (EPIET convention).
+
+```{r daily-epicurve, fig.height=6, fig.width=10}
+cases_onset <- cohort %>%
+  filter(case == 1, !is.na(symp_onset)) %>%
+  mutate(onset_date = as.Date(symp_onset))
+
+i_daily <- incidence(cases_onset, date_index = "onset_date",
+                     date_names_to = "date")
+
+# Build EPIET stacked-square plot
+daily_df <- as.data.frame(i_daily)
+squares <- daily_df %>%
+  uncount(count) %>%
+  group_by(date) %>%
+  mutate(y = row_number()) %>%
+  ungroup()
+
+ggplot(squares, aes(x = date, y = y)) +
+  geom_tile(aes(fill = "case"), width = 0.1, height = 0.9, colour = "white") +
+  scale_fill_manual(values = c("case" = "steelblue"), labels = "One case") +
+  scale_x_date(date_breaks = "1 day", date_labels = "%a\n%d %b") +
+  scale_y_continuous(breaks = seq(0, 50, 1)) +
+  labs(title = "Daily Epidemic Curve",
+       x = "Date of symptom onset", y = "Number of cases", fill = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 9),
+        legend.position = c(0.95, 0.95),
+        legend.justification = c(1, 1),
+        legend.background = element_rect(fill = "white", colour = "grey70",
+                                         linewidth = 0.3),
+        legend.key.size = unit(0.5, "cm"))
+```
+
+Stratifying by sex reveals no meaningful difference in timing — both sexes fall ill
+across the same window, consistent with a shared exposure.
+
+```{r epicurve-by-sex, fig.height=6, fig.width=10}
+i_sex <- incidence(cases_onset, date_index = "onset_date",
+                   groups = "sex", date_names_to = "date")
+
+sex_df <- as.data.frame(i_sex)
+sex_squares <- sex_df %>%
+  uncount(count) %>%
+  arrange(date, sex) %>%
+  group_by(date) %>%
+  mutate(y = row_number()) %>%
+  ungroup()
+
+ggplot(sex_squares, aes(x = date, y = y, fill = sex)) +
+  geom_tile(width = 0.1, height = 0.9, colour = "white") +
+  scale_fill_manual(values = c("male" = "steelblue", "female" = "lightblue")) +
+  scale_x_date(date_breaks = "1 day", date_labels = "%a\n%d %b") +
+  scale_y_continuous(breaks = seq(0, 50, 1)) +
+  labs(title = "Daily Epidemic Curve by Sex",
+       x = "Date of symptom onset", y = "Number of cases", fill = "Sex") +
+  theme_minimal() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(size = 9))
+```
+
+### Identifying the Peak
+
+The `keep_peaks()` function from `incidence2` returns the date(s) with the highest case
+count. For a confidence interval around the peak, `estimate_peak()` uses bootstrapping:
+it resamples the observed onset dates with replacement (100 times by default) and records
+which date is the peak in each resample, yielding a distribution of plausible peak dates.
+
+```{r peak-estimation}
+peak_row <- keep_peaks(i_daily)
+cat("Observed peak day:", format(peak_row$date[1], "%A %d %B %Y"),
+    "with", peak_row$count[1], "cases\n")
+
+set.seed(2026)
+peak_est <- estimate_peak(i_daily, progress = FALSE) %>%
+  select(-count_variable)
+peak_est %>% knitr::kable(caption = "Bootstrap peak estimate (n = 100 resamples)")
+```
+
+
+## Cumulative Incidence
+
+We compute the running total of cases by taking the cumulative sum of daily counts.
+For a point-source outbreak, this should form a characteristic S-shape:
+a slow start, a steep middle, and an early plateau.
+
+```{r cumulative, fig.height=4, fig.width=9}
+# Compute cumulative incidence from the daily counts we already have
+cum_df <- daily_df %>%
+  arrange(date) %>%
+  mutate(cumulative = cumsum(count))
+
+ggplot(cum_df, aes(x = date, y = cumulative)) +
+  geom_col(fill = "steelblue", width = 0.4, colour = "white") +
+  scale_x_date(date_breaks = "1 day", date_labels = "%a\n%d %b") +
+  scale_y_continuous(breaks = seq(0, 50, 5)) +
+  labs(title = "Cumulative Incidence Over Time",
+       x = "Date", y = "Cumulative number of cases") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 9))
+```
+
+The steep S-curve confirms the point-source pattern: nearly all cases accumulated
+within a roughly 3-day window.
+
+
+# Incubation Period
+
+The incubation period — the interval between exposure and symptom onset — is one of the
+most informative clues for identifying the pathogen. We calculate it as:
+
+$$\text{Incubation (hours)} = t_{\text{onset}} - t_{\text{party}}$$
+
+where $t_{\text{party}}$ = 26 February 2026 at 19:00 (the start of food service). This
+treats all guests as having a common exposure time, which is reasonable since the party
+was a single evening event.
+
+```{r incubation-summary}
+inc <- cohort %>% filter(case == 1, !is.na(incubation_h))
+
+inc_stats <- inc %>%
+  summarise(
+    n      = n(),
+    mean   = round(mean(incubation_h), 1),
+    median = round(median(incubation_h), 1),
+    IQR    = paste0(round(quantile(incubation_h, .25), 1), " – ",
+                    round(quantile(incubation_h, .75), 1)),
+    range  = paste0(round(min(incubation_h), 1), " – ",
+                    round(max(incubation_h), 1))
+  )
+
+inc_stats %>% knitr::kable(caption = "Incubation period (hours from party at 19:00)")
+```
+
+```{r incubation-plot, fig.width=10}
+inc_binned <- inc %>%
+  mutate(bin = floor(incubation_h / 3) * 3) %>%
+  arrange(bin) %>%
+  group_by(bin) %>%
+  mutate(y = row_number()) %>%
+  ungroup()
+
+ggplot(inc_binned, aes(x = bin, y = y)) +
+  geom_tile(aes(fill = "case"), width = 2.7, height = 0.9, colour = "white",
+            show.legend = TRUE) +
+  scale_fill_manual(values = c("case" = "grey55"), labels = c("One case")) +
+  geom_vline(xintercept = median(inc$incubation_h),
+             linetype = "dashed", colour = "red") +
+  annotate("text", x = median(inc$incubation_h), y = max(inc_binned$y) + 0.8,
+           label = paste0("Median: ", round(median(inc$incubation_h), 1), " h"),
+           hjust = -0.1, colour = "red", size = 3.5) +
+  scale_x_continuous(breaks = seq(0, 84, 6)) +
+  scale_y_continuous(breaks = seq(0, 20, 1), expand = expansion(add = c(0, 1))) +
+  labs(title = "Distribution of Incubation Periods",
+       x = "Hours from party to symptom onset", y = "Number of cases",
+       fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(),
+        legend.position      = c(0.95, 0.95),
+        legend.justification = c(1, 1),
+        legend.background    = element_rect(fill = "white", colour = "grey70",
+                                            linewidth = 0.3),
+        legend.key.size      = unit(0.5, "cm"))
+```
+
+
+# Symptom Profile
+
+The combination and relative frequency of symptoms helps narrow down the pathogen.
+Predominant vomiting points towards norovirus or *S. aureus* toxin, while
+diarrhoea-dominant illness with fever suggests *Salmonella* or *Campylobacter*.
+
+```{r symptoms}
+symp_cols <- c("nausea", "vomiting", "diarrhoea", "abdom_cramps",
+               "headache", "fever", "blood_in_stool")
+
+cases_df <- cohort %>% filter(case == 1)
+
+symp_tbl <- tibble(
+  symptom = symp_cols,
+  n       = map_int(symp_cols, ~ sum(cases_df[[.x]] == 1, na.rm = TRUE)),
+  pct     = round(n / nrow(cases_df) * 100, 1)
+) %>%
+  arrange(desc(pct))
+
+symp_tbl %>% knitr::kable(caption = "Symptoms among cases")
+```
+
+```{r symptoms-plot, fig.height=4}
+symp_tbl %>%
+  mutate(symptom = fct_reorder(symptom, pct)) %>%
+  ggplot(aes(symptom, pct)) +
+  geom_col(fill = "#E07B39", width = 0.6) +
+  geom_text(aes(label = paste0(pct, "%")), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 110)) +
+  labs(title = "Symptom Frequency Among Cases",
+       x = NULL, y = "% of cases") +
+  theme_minimal()
+```
+
+Vomiting is universal (100%), nausea near-universal (98%), diarrhoea very common (93%),
+and there is zero bloody stool. Fever is present in about 43% of cases. This vomiting-
+predominant profile with no bloody stool strongly favours a viral or toxin-mediated
+aetiology over invasive bacterial pathogens.
+
+
+## Illness Duration
+
+Among cases where both onset and resolution times are available, illness duration is:
+
+$$\text{Duration (hours)} = t_{\text{stop}} - t_{\text{onset}}$$
+
+```{r duration}
+dur_df <- cohort %>%
+  filter(case == 1, !is.na(duration_h), duration_h > 0)
+
+dur_df %>%
+  summarise(
+    n = n(), mean = round(mean(duration_h), 1),
+    median = round(median(duration_h), 1),
+    IQR = paste0(round(quantile(duration_h, .25), 1), " – ",
+                 round(quantile(duration_h, .75), 1)),
+    range = paste0(round(min(duration_h), 1), " – ", round(max(duration_h), 1))
+  ) %>%
+  knitr::kable(caption = "Duration of illness (hours)")
+```
+
+```{r duration-plot, fig.height=4, fig.width=9}
+ggplot(dur_df, aes(x = duration_h)) +
+  geom_histogram(binwidth = 6, fill = "#E07B39", colour = "white", boundary = 0) +
+  geom_vline(xintercept = median(dur_df$duration_h),
+             linetype = "dashed", colour = "black", linewidth = 0.6) +
+  annotate("text",
+           x = median(dur_df$duration_h) + 1.5,
+           y = Inf, vjust = 1.5,
+           label = paste0("Median: ", round(median(dur_df$duration_h), 1), " h"),
+           size = 3.5, fontface = "bold") +
+  scale_x_continuous(breaks = seq(0, 120, 12)) +
+  labs(title = "Distribution of Illness Duration",
+       x = "Duration (hours)", y = "Number of cases") +
+  theme_minimal()
+```
+
+The timeline below shows each case's illness window from onset to recovery, ordered by
+when they first fell ill.
+
+```{r onset-recovery-timeline, fig.height=8, fig.width=11}
+timeline_df <- cohort %>%
+  filter(case == 1, !is.na(symp_onset), !is.na(symp_stop)) %>%
+  arrange(symp_onset) %>%
+  mutate(person = paste0(first, " ", last),
+         person = fct_inorder(person))
+
+ggplot(timeline_df) +
+  geom_segment(aes(x = symp_onset, xend = symp_stop,
+                   y = person, yend = person),
+               colour = "#D35F5F", linewidth = 3, lineend = "round") +
+  geom_vline(xintercept = as.numeric(party_time),
+             linetype = "dashed", colour = "red", linewidth = 0.5) +
+  annotate("text", x = party_time, y = Inf, vjust = 1.3,
+           label = "Party", colour = "red", size = 3, fontface = "bold") +
+  scale_x_datetime(
+    date_breaks = "1 day",
+    date_labels = "%a\n%d %b",
+    minor_breaks = NULL
+  ) +
+  labs(title = "Symptom Timeline — Onset to Recovery",
+       subtitle = "Each bar spans one person's illness window",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.y        = element_text(size = 6.5),
+        axis.text.x        = element_text(size = 8),
+        panel.grid.major.y = element_blank())
+```
+
+Still ill at time of interview: **`r sum(cohort$still_ill == 1, na.rm = TRUE)`** persons.
+
+The self-limiting nature (median ~38 hours) is consistent with viral gastroenteritis.
+Bacterial toxin illness (*S. aureus*) resolves faster (< 24 h), while invasive infections
+(*Salmonella*) often last longer with more prominent fever.
+
+
+# Food-Specific Attack Rates
+
+This is the analytical heart of the investigation. For each of the 12 foods served,
+we construct a standard 2×2 table. The cells represent:
+
+|                  | Ill (case=1) | Well (case=0) |
+|------------------|:---:|:---:|
+| **Ate the food** (exposed)    | a | b |
+| **Did not eat** (unexposed) | c | d |
+
+From this we compute three key measures:
+
+- **Attack rate among exposed** (AR~exp~) = a / (a + b)
+- **Attack rate among unexposed** (AR~unexp~) = c / (c + d)
+- **Risk ratio** (RR) = AR~exp~ / AR~unexp~
+
+A risk ratio significantly greater than 1.0 — with a confidence interval that does not
+include 1.0 and a Fisher's exact p-value below 0.05 — indicates a statistically
+significant association between that food and illness.
+
+We compute these using `epitab()` from the `epitools` package, which produces Wald 95%
+confidence intervals and Fisher's exact p-values.
+
+```{r food-attack-rates}
+food_ar <- map_dfr(food_cols, function(f) {
+
+  tmp <- cohort %>%
+    filter(!is.na(.data[[f]]), !is.na(case))
+
+  a <- sum(tmp[[f]] == 0 & tmp$case == 0)   # unexposed, well
+  b <- sum(tmp[[f]] == 0 & tmp$case == 1)   # unexposed, ill
+  c <- sum(tmp[[f]] == 1 & tmp$case == 0)   # exposed, well
+  d <- sum(tmp[[f]] == 1 & tmp$case == 1)   # exposed, ill
+
+  mat <- matrix(c(a, b, c, d), nrow = 2, byrow = TRUE,
+                dimnames = list(c("Unexposed", "Exposed"), c("Well", "Ill")))
+
+  n_unexp <- a + b
+  n_exp   <- c + d
+
+  res <- tryCatch(
+    epitab(mat, method = "riskratio", rev = "neither",
+           pvalue = "fisher.exact", verbose = TRUE),
+    error = function(e) NULL
+  )
+
+  if (is.null(res)) {
+    return(tibble(food = f,
+                  ill_exp = d, well_exp = c, n_exp = n_exp,
+                  AR_exp = round(d / n_exp * 100, 1),
+                  ill_unexp = b, well_unexp = a, n_unexp = n_unexp,
+                  AR_unexp = round(b / n_unexp * 100, 1),
+                  RR = NA, lower = NA, upper = NA, p = NA))
+  }
+
+  tibble(
+    food      = f,
+    ill_exp   = d,
+    well_exp  = c,
+    n_exp     = n_exp,
+    AR_exp    = round(d / n_exp * 100, 1),
+    ill_unexp = b,
+    well_unexp = a,
+    n_unexp   = n_unexp,
+    AR_unexp  = round(b / n_unexp * 100, 1),
+    RR        = round(res$tab["Exposed", "riskratio"], 2),
+    lower     = round(res$tab["Exposed", "lower"], 2),
+    upper     = round(res$tab["Exposed", "upper"], 2),
+    p         = round(res$tab["Exposed", "p.value"], 4)
+  )
+})
+
+food_ar %>%
+  arrange(desc(RR)) %>%
+  select(food, ill_exp, well_exp, n_exp, AR_exp,
+         ill_unexp, well_unexp, n_unexp, AR_unexp,
+         RR, lower, upper, p) %>%
+  knitr::kable(
+    caption = "Food-specific attack rates and risk ratios (Exposed | Unexposed)",
+    col.names = c("Food", "Ill", "Well", "Total", "AR%",
+                  "Ill", "Well", "Total", "AR%",
+                  "RR", "Lower", "Upper", "p")
+  )
+```
+
+*Left block = Exposed (ate the food). Right block = Unexposed (did not eat).*
+
+**Tiramisu** stands out dramatically. The table shows that nearly all those who ate it
+became ill, while the attack rate among those who did not eat it was far lower. The
+risk ratio — the highest of any food item — is statistically significant (p < 0.001),
+meaning a tiramisu eater was substantially more likely to become ill. Strawberries and
+herb quark also show significant associations, but with lower effect sizes — these may
+reflect confounding (see stratified analysis below).
+
+```{r rr-forest, fig.height=5}
+food_ar %>%
+  filter(!is.na(RR)) %>%
+  mutate(food = fct_reorder(food, RR)) %>%
+  ggplot(aes(x = food, y = RR)) +
+  geom_point(size = 3, colour = "#B33A3A") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, colour = "#B33A3A") +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
+  coord_flip() +
+  labs(title = "Risk Ratios by Food Item",
+       subtitle = "Dashed line at RR = 1.0 (no association)",
+       x = NULL, y = "Risk Ratio (95% CI)") +
+  theme_minimal()
+```
+
+```{r food-2x2-bars, fig.height=6, fig.width=10}
+food_long <- food_ar %>%
+  select(food, ill_exp, well_exp) %>%
+  pivot_longer(cols = c(ill_exp, well_exp),
+               names_to = "outcome", values_to = "n") %>%
+  mutate(outcome = ifelse(outcome == "ill_exp", "Ill", "Well"),
+         food = fct_reorder(food, n, .fun = sum))
+
+ggplot(food_long, aes(x = food, y = n, fill = outcome)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5), size = 3.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("Ill" = "#D35F5F", "Well" = "#6BAF6B")) +
+  labs(title = "Among those who ate each food: ill vs. well",
+       x = NULL, y = "Number of persons", fill = "Outcome") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+
+## Co-consumption: Tiramisu and Strawberries
+
+The food-specific analysis flagged both tiramisu (highest RR) and strawberries as
+significantly associated with illness. Before concluding that two separate food items
+are independent risk factors, we need to check how strongly their consumption overlaps.
+If most people who ate strawberries also ate tiramisu, the strawberry signal may simply
+be piggybacking on the tiramisu effect (confounding by co-consumption).
+
+We build a 2×2 co-consumption table crossing tiramisu and strawberry consumption, then
+colour-code each cell by the proportion who fell ill.
+
+```{r tiramisu-strawberry-cross, fig.height=5, fig.width=8}
+# Cross-tabulate tiramisu × strawberry consumption and illness
+co_df <- cohort %>%
+  filter(!is.na(tiramisu), !is.na(strawberries)) %>%
+  mutate(
+    tiramisu_label    = ifelse(tiramisu == 1, "Ate tiramisu", "No tiramisu"),
+    strawberry_label  = ifelse(strawberries == 1, "Ate strawberries", "No strawberries")
+  ) %>%
+  group_by(tiramisu_label, strawberry_label) %>%
+  summarise(n = n(), cases = sum(case), AR = round(cases / n * 100, 1), .groups = "drop")
+
+co_df %>% knitr::kable(caption = "Co-consumption of tiramisu and strawberries with attack rates")
+```
+
+```{r tiramisu-strawberry-mosaic, fig.height=5, fig.width=7}
+# Mosaic-style heatmap: each cell sized by n, coloured by attack rate
+ggplot(co_df, aes(x = tiramisu_label, y = strawberry_label)) +
+  geom_tile(aes(fill = AR), colour = "white", linewidth = 1.5) +
+  geom_text(aes(label = paste0("n=", n, "\n", cases, " ill\nAR=", AR, "%")),
+            size = 4, fontface = "bold") +
+  scale_fill_gradient(low = "#B8E6B8", high = "#D35F5F",
+                      limits = c(0, 100), name = "Attack rate (%)") +
+  labs(title = "Attack Rates by Tiramisu × Strawberry Consumption",
+       subtitle = "High overlap suggests confounding — strawberry effect may not be independent",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        legend.position = "right")
+```
+
+```{r tiramisu-strawberry-venn, fig.height=4, fig.width=7}
+# Stacked bar: among strawberry eaters vs non-eaters, what % also ate tiramisu?
+venn_df <- cohort %>%
+  filter(!is.na(tiramisu), !is.na(strawberries)) %>%
+  mutate(
+    strawberry_grp = ifelse(strawberries == 1, "Ate strawberries", "No strawberries"),
+    tiramisu_grp   = ifelse(tiramisu == 1, "Ate tiramisu", "No tiramisu")
+  ) %>%
+  count(strawberry_grp, tiramisu_grp)
+
+ggplot(venn_df, aes(x = strawberry_grp, y = n, fill = tiramisu_grp)) +
+  geom_col(position = "fill", width = 0.6, colour = "white") +
+  geom_text(aes(label = n), position = position_fill(vjust = 0.5), size = 4) +
+  scale_fill_manual(values = c("Ate tiramisu" = "#D35F5F", "No tiramisu" = "#6BAF6B")) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "Among strawberry eaters: what proportion also ate tiramisu?",
+       subtitle = "If overlap is near 100%, the strawberry association is likely confounding",
+       x = NULL, y = "Proportion", fill = NULL) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+The heatmap and stacked bar together reveal how tightly the two foods are linked: if
+nearly all strawberry eaters also ate tiramisu, then the strawberry RR is an artefact
+of co-consumption rather than an independent risk factor.
+
+
+# Dose–Response
+
+If tiramisu is truly the vehicle, we would expect a dose–response relationship: the more
+food items consumed, the higher the chance of having also eaten tiramisu, and hence the
+higher the attack rate.
+
+```{r dose-response}
+cohort %>%
+  mutate(n_foods = rowSums(across(all_of(food_cols), ~ . == 1), na.rm = TRUE)) %>%
+  group_by(n_foods) %>%
+  summarise(n = n(), cases = sum(case, na.rm = TRUE),
+            AR = round(cases / n * 100, 1), .groups = "drop") %>%
+  knitr::kable(caption = "Attack rate by number of food items consumed")
+```
+
+Nobody who ate fewer than 4 items became ill, while attack rates exceed 85% once 5 or
+more items were consumed — consistent with tiramisu being a widely eaten item.
+
+
+# Stratified Analysis
+
+The observed associations for strawberries and herb quark could be confounding: if most
+people who ate strawberries also ate tiramisu, the strawberry association might be
+artefactual. We stratify the tiramisu effect by these potential confounders.
+
+If the RR for tiramisu remains elevated and significant within each stratum, the
+association is robust and not explained by the confounder.
+
+```{r stratified-fn}
+strat_rr <- function(data, exposure, stratum) {
+  lvls <- sort(na.omit(unique(data[[stratum]])))
+  map_dfr(lvls, function(s) {
+    sub <- data %>% filter(.data[[stratum]] == s, !is.na(.data[[exposure]]), !is.na(case))
+    a <- sum(sub[[exposure]] == 0 & sub$case == 0)
+    b <- sum(sub[[exposure]] == 0 & sub$case == 1)
+    cc <- sum(sub[[exposure]] == 1 & sub$case == 0)
+    d <- sum(sub[[exposure]] == 1 & sub$case == 1)
+    mat <- matrix(c(a, b, cc, d), nrow = 2, byrow = TRUE,
+                  dimnames = list(c("Unexposed","Exposed"), c("Well","Ill")))
+    tryCatch({
+      r <- epitab(mat, method = "riskratio", pvalue = "fisher.exact", verbose = TRUE)
+      tibble(stratum = paste0(stratum, " = ", s), n = sum(mat),
+             RR = round(r$tab["Exposed","riskratio"], 2),
+             CI = paste0(round(r$tab["Exposed","lower"],2), "–",
+                         round(r$tab["Exposed","upper"],2)),
+             p  = round(r$tab["Exposed","p.value"], 4))
+    }, error = function(e) {
+      tibble(stratum = paste0(stratum, " = ", s), n = sum(mat),
+             RR = NA_real_, CI = NA_character_, p = NA_real_)
+    })
+  })
+}
+```
+
+```{r stratified-examples}
+strat_rr(cohort, "tiramisu", "potato_salad") %>%
+  knitr::kable(caption = "RR for tiramisu stratified by potato salad consumption")
+
+strat_rr(cohort, "tiramisu", "sex") %>%
+  knitr::kable(caption = "RR for tiramisu stratified by sex")
+```
+
+The tiramisu risk ratio stays well above 1.0 in every stratum — the association is not
+explained by potato salad consumption or sex.
+
+
+# Confounders and Alternative Explanations
+
+Before concluding that the outbreak was caused by a food served at the party, we rule
+out other explanations: recent travel outside Germany (a possible imported infection)
+and self-reported illness in the 4 weeks prior.
+
+```{r confounders}
+cohort %>%
+  count(travelled, case) %>%
+  pivot_wider(names_from = case, values_from = n, names_prefix = "case_") %>%
+  knitr::kable(caption = "Travel history vs. illness")
+
+cohort %>%
+  count(ill_prior, case) %>%
+  pivot_wider(names_from = case, values_from = n, names_prefix = "case_") %>%
+  knitr::kable(caption = "Prior illness (4 weeks before party) vs. case status")
+```
+
+Neither travel nor prior illness is associated with case status.
+
+
+# Household Clustering
+
+Many guests attended as families. We tabulate attack rates by household to check
+for clustering.
+
+```{r household}
+hh <- cohort %>%
+  group_by(household) %>%
+  summarise(members = n(), cases = sum(case, na.rm = TRUE),
+            AR = paste0(round(cases / members * 100, 0), "%"), .groups = "drop") %>%
+  arrange(desc(members))
+
+hh %>% knitr::kable(caption = "Attack rate by household")
+```
+
+
+# Secondary Attack Rate and Reproduction Number
+
+## Why R~0~ Does Not Apply Here
+
+The **basic reproduction number** (R~0~) is defined as the average number of secondary
+cases caused by a single infectious individual in a completely susceptible population
+(Karch, *Dynamics of Infection*). It is composed of three factors:
+
+$$R_0 = \beta \times D \times N$$
+
+where $\beta$ is the probability of effective transmission per contact per unit time,
+$D$ is the duration of infectiousness, and $N$ is the population size. The **net
+reproduction number** adjusts for partial immunity:
+
+$$R_n = R_0 \times s$$
+
+where $s$ is the proportion of the population still susceptible.
+
+These quantities assume **person-to-person transmission chains** — a case infects contacts
+who become new cases, who in turn infect further contacts. In our foodborne point-source
+outbreak, the primary route is food → person: a contaminated vehicle infects many people
+at once. There is no chain of human-to-human transmission to count, so R~0~ in its
+classical sense does not apply.
+
+## What We Can Assess: Evidence of Secondary Transmission
+
+Even in a foodborne outbreak, secondary person-to-person spread can follow, especially
+with highly transmissible agents like norovirus. The **secondary attack rate** (SAR),
+defined by Karch as:
+
+$$\text{SAR} = \frac{d}{N}$$
+
+where $d$ is the number of secondary cases and $N$ is the total number of exposed
+contacts of a primary case (e.g., within a household), would be the right tool to
+quantify onward spread.
+
+However, in our data all household members attended the party together — they are
+**co-exposed primary cases**, not unexposed household contacts of an index case. We
+therefore cannot compute a classical SAR. What we *can* do is examine the timing of
+symptom onsets within households: if a late-onset case appears well beyond the expected
+incubation window of the primary exposure (say, >48 h), that could signal secondary
+person-to-person transmission within the household.
+
+```{r secondary-ar}
+hh_onsets <- cohort %>%
+  filter(case == 1, !is.na(symp_onset)) %>%
+  group_by(household) %>%
+  filter(n() >= 2) %>%
+  summarise(
+    n_cases    = n(),
+    earliest   = min(symp_onset),
+    latest     = max(symp_onset),
+    spread_h   = as.numeric(difftime(max(symp_onset), min(symp_onset), units = "hours")),
+    .groups    = "drop"
+  ) %>%
+  arrange(desc(spread_h))
+
+hh_onsets %>%
+  mutate(earliest = format(earliest, "%d %b %H:%M"),
+         latest   = format(latest, "%d %b %H:%M")) %>%
+  knitr::kable(caption = "Onset spread within households (2+ cases)")
+```
+
+```{r secondary-ar-note}
+n_wide <- sum(hh_onsets$spread_h > 48, na.rm = TRUE)
+```
+
+To visualise this directly, we plot every case's symptom onset on a timeline, colour-coded
+by household. If secondary transmission were occurring, we would expect to see cases from
+the same household (same colour) appearing in two distinct clusters — an early group
+(primary cases from the food exposure) and a delayed group (secondary cases infected
+person-to-person). If instead all colours are intermixed in a single wave, the pattern
+favours co-exposure with individual variation in incubation.
+
+```{r household-onset-epicurve, fig.height=7, fig.width=12}
+# Keep only households with 2+ cases for meaningful clustering analysis
+hh_cases <- cohort %>%
+  filter(case == 1, !is.na(symp_onset)) %>%
+  group_by(household) %>%
+  filter(n() >= 2) %>%
+  ungroup() %>%
+  mutate(hh_label = paste0("HH ", household))
+
+# Sort by onset within each household
+hh_cases <- hh_cases %>%
+  arrange(household, symp_onset) %>%
+  mutate(person = paste0(first, " ", last),
+         person = fct_inorder(person))
+
+# Distinct colour palette for households
+n_hh <- n_distinct(hh_cases$hh_label)
+hh_colours <- setNames(
+  colorRampPalette(c("#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00",
+                     "#A65628","#F781BF","#999999","#66C2A5","#FC8D62",
+                     "#8DA0CB","#E78AC3","#A6D854","#FFD92F","#E5C494"))(n_hh),
+  sort(unique(hh_cases$hh_label))
+)
+
+ggplot(hh_cases, aes(x = symp_onset, y = person, colour = hh_label)) +
+  geom_point(size = 4) +
+  geom_vline(xintercept = as.numeric(party_time),
+             linetype = "dashed", colour = "red", linewidth = 0.5) +
+  annotate("text", x = party_time, y = Inf, vjust = 1.3,
+           label = "Party", colour = "red", size = 3, fontface = "bold") +
+  scale_x_datetime(date_breaks = "12 hours", date_labels = "%d %b\n%H:%M") +
+  scale_colour_manual(values = hh_colours) +
+  labs(title = "Symptom Onset by Household (multi-case households only)",
+       subtitle = "Same colour = same household. Clustered onset times suggest co-exposure, not secondary spread.",
+       x = "Date / Time of symptom onset", y = NULL, colour = "Household") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.y        = element_text(size = 7),
+        axis.text.x        = element_text(size = 8),
+        panel.grid.major.y = element_blank(),
+        legend.position    = "right")
+```
+
+```{r household-onset-strip, fig.height=4, fig.width=11}
+# Strip plot: one row per household, dots at each member's onset
+ggplot(hh_cases, aes(x = symp_onset, y = hh_label, colour = hh_label)) +
+  geom_point(size = 3.5, alpha = 0.8) +
+  geom_line(aes(group = hh_label), linewidth = 0.8, alpha = 0.4) +
+  geom_vline(xintercept = as.numeric(party_time),
+             linetype = "dashed", colour = "red", linewidth = 0.5) +
+  geom_vline(xintercept = as.numeric(party_time + hours(48)),
+             linetype = "dotted", colour = "grey40", linewidth = 0.5) +
+  annotate("text", x = party_time + hours(48), y = Inf, vjust = 1.3,
+           label = "48 h post-party", colour = "grey40", size = 3, hjust = -0.05) +
+  scale_x_datetime(date_breaks = "12 hours", date_labels = "%d %b\n%H:%M") +
+  scale_colour_manual(values = hh_colours, guide = "none") +
+  labs(title = "Within-Household Onset Spread",
+       subtitle = "Each line connects household members' onset times. Dots beyond 48 h line could indicate secondary transmission.",
+       x = "Date / Time of symptom onset", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(size = 8),
+        panel.grid.major.y = element_blank())
+```
+
+Households with onset spread >48 hours: **`r n_wide`**. While a few households show
+spreads near this threshold, the most parsimonious explanation is individual variation
+in incubation time rather than secondary transmission. The epidemic curve shows no
+secondary wave, and the overall pattern remains consistent with a single shared exposure.
+
+If norovirus is confirmed — a pathogen known for household secondary attack rates of
+30–40% in published studies — follow-up investigation of household contacts who did
+*not* attend the party would be warranted to detect any onward spread.
+
+
+# Pathogen Hypothesis
+
+Combining the epidemiological and clinical findings:
+
+```{r pathogen-vars}
+med_inc <- round(median(inc$incubation_h), 1)
+overall_ar <- round(mean(cohort$case, na.rm = TRUE) * 100, 1)
+```
+
+| Feature             | Observation                                           |
+|---------------------|-------------------------------------------------------|
+| Incubation (median) | **`r med_inc` hours**                                 |
+| Attack rate         | `r overall_ar`%                                       |
+| Key symptoms        | Vomiting (100%), nausea, diarrhoea, abdominal cramps  |
+| Bloody stool        | 0%                                                    |
+| Fever               | ~43%                                                  |
+| Duration (median)   | ~38 hours, self-limiting                              |
+| Epi curve           | Point-source pattern                                  |
+
+**Differential diagnosis:**
+
+- **Norovirus** — incubation 12–48 h, vomiting-predominant, very high attack rates, and
+  notorious for secondary spread. Median incubation of ~30 h, 100% vomiting, no bloody
+  stool, and self-limiting course all fit.
+- **Staphylococcus aureus enterotoxin** — incubation 1–6 h. Excluded by the much longer
+  incubation observed here.
+- **Bacillus cereus (emetic type)** — incubation 1–6 h. Same exclusion.
+- **Salmonella spp.** — incubation 6–72 h, typically more diarrhoea-dominant with higher
+  fever. Possible but less consistent with the vomiting-predominant profile.
+- **Clostridium perfringens** — incubation 6–24 h, primarily diarrhoea and cramps,
+  vomiting less common. Median incubation here exceeds the typical range.
+
+**Conclusion:** With a median incubation of **`r med_inc` h**, universal vomiting, an
+attack rate of `r overall_ar`%, and a clear point-source curve, **norovirus** is the
+most probable agent. **Tiramisu** — the food item with the highest risk ratio — should
+be prioritised for virological testing. Stool samples from symptomatic cases should be
+collected for RT-PCR confirmation.
