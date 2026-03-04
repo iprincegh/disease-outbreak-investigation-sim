@@ -69,6 +69,9 @@ The linelist has 79 rows (56 attendees + 23 incomplete/non-attendee records that
 
 One known quirk: Margarete Schubert's `symp_stop` has a truncated year (`28.02.202` instead of `28.02.2026`), which gets caught and fixed in the cleaning step.
 
+## Team
+Sara, George, Christiane & Prince
+
 ## References
 
 The methodology follows materials from:
